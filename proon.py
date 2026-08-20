@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import requests
 import os
@@ -43,11 +43,12 @@ DICTIONARY_WORDS = [
     "setup",
 ]
 
-EXTENSIONS = ["", ".html", ".php", ".json", ".xml", ".txt", ".yaml", ".yml"]
+# 严格收窄：只允许 .yaml 和 .yam 后缀（空字符串用于保留目录底座）
+EXTENSIONS = ["", ".yaml", ".yam"]
 
 
 def load_dynamic_base_dirs():
-  """严格只加载以 / 结尾的明确目录型路径，防止路径树爆炸"""
+  """安全加载明确的目录型底座（支持完整 URL 或相对路径的兼容读取）"""
   dirs = set(FALLBACK_BASE_DIRS)
 
   if os.path.exists(OUTPUT_FILE):
@@ -57,19 +58,26 @@ def load_dynamic_base_dirs():
     try:
       with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
         for line in f:
-          path = line.strip()
-          if not path:
+          line_str = line.strip()
+          if not line_str:
             continue
-          # 核心安全控制：只有明确以 / 结尾的路径才作为下一轮目录底座
+          # 兼容处理：如果是完整 URL，提取出它的 path 部分
+          if line_str.startswith("http://") or line_str.startswith(
+              "https://"
+          ):
+            parsed_u = urlparse(line_str)
+            path = parsed_u.path
+          else:
+            path = line_str
+
+          # 只有明确以 / 结尾的路径才作为下一轮目录底座
           if path.endswith("/"):
             dirs.add(path)
       print(f"[*] 成功安全加载 {len(dirs)} 个有效目录作为探测基底。")
     except Exception as e:
       print(f"[!] 读取历史资产文件出错: {e}，将使用默认兜底目录。")
   else:
-    print(
-        "[*] 未发现本地历史资产文件，使用默认兜底目录启动。"
-    )
+    print("[*] 未发现本地历史资产文件，使用默认兜底目录启动。")
 
   return sorted(list(dirs))
 
@@ -110,7 +118,7 @@ def get_soft_404_baseline():
 
 
 def generate_payloads(base_dirs):
-  """基于严格清洗后的目录矩阵组合字典和扩展名"""
+  """基于严格清洗后的目录矩阵组合字典和 .yaml/.yam 后缀"""
   payloads = set(base_dirs)
   for base_dir in base_dirs:
     clean_dir = base_dir if base_dir.endswith("/") else base_dir + "/"
@@ -158,7 +166,6 @@ def check_path(path, baseline):
 
     if r.status_code == 200:
       if baseline["status"] == 200:
-        current_length = len(r.content)
         current_title = ""
         current_snippet = r.text[:300].strip().lower()
 
@@ -188,23 +195,16 @@ def check_path(path, baseline):
 
 
 def run_fuzzing():
-  # 1. 严格只加载以 / 结尾的目录作为底座
   base_dirs = load_dynamic_base_dirs()
-
-  # 2. 获取软 404 基准
   baseline = get_soft_404_baseline()
-
-  # 3. 生成可控的探测矩阵
   paths_to_test = generate_payloads(base_dirs)
   print(
       f"开始高精度防误杀深度探测：加载安全目录底座 {len(base_dirs)} 个，共生成"
       f" {len(paths_to_test)} 个候选目标..."
   )
 
-  # 初始化结果库，包含所有合法的历史目录
   found_paths = set(base_dirs)
 
-  # 4. 并发执行高精度验证
   with ThreadPoolExecutor(max_workers=20) as executor:
     futures = {
         executor.submit(check_path, p, baseline): p for p in paths_to_test
@@ -218,8 +218,22 @@ def run_fuzzing():
 
 
 if __name__ == "__main__":
-  result = run_fuzzing()
+  raw_results = run_fuzzing()
+
+  # 过滤规则：只保留目录型路径（以 / 结尾）或者以 .yaml / .yam 结尾的完整链接
+  filtered_results = []
+  for p in raw_results:
+    if p.endswith("/") or p.endswith(".yaml") or p.endswith(".yam"):
+      # 统一拼接转换成完整的绝对 URL 输出
+      full_url = TARGET_URL.rstrip("/") + (p if p.startswith("/") else "/" + p)
+      filtered_results.append(full_url)
+
+  # 写入文件
   with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-    for p in result:
-      f.write(p + "\n")
-  print(f"探测完成，最终产出纯净有效路径库 {len(result)} 个，已保存至 {OUTPUT_FILE}")
+    for url_item in sorted(list(set(filtered_results))):
+      f.write(url_item + "\n")
+
+  print(
+      f"探测完成，最终产出纯净有效完整 URL 库 {len(filtered_results)}"
+      f" 个（仅保留目录及 .yaml/.yam），已保存至 {OUTPUT_FILE}"
+  )
