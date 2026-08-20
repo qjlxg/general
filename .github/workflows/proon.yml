@@ -33,7 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
-      - name: 运行升级版路径抓取脚本
+      - name: 运行路径探测脚本
         run: |
           python proon.py
 
@@ -41,5 +41,5 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add proton_paths.txt
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update ProON full paths [skip ci]" && git push)
+          git add proon_paths.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update ProON paths [skip ci]" && git push)
