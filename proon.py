@@ -32,14 +32,13 @@ def get_all_paths():
   except Exception:
     pass
 
-  # robots.txt 没找到 Sitemap，主动尝试常见地址兜底
   if not sitemaps:
     sitemaps = [
         urljoin(TARGET_URL, "/sitemap.xml"),
         urljoin(TARGET_URL, "/sitemap_index.xml"),
     ]
 
-  # 2. 根据 XML 根节点精确解析 Sitemap / Sitemap Index
+  # 2. 精确解析 Sitemap / Sitemap Index
   def parse_sitemap(url):
     try:
       r = requests.get(url, headers=HEADERS, timeout=10)
@@ -47,23 +46,18 @@ def get_all_paths():
         return
 
       root = ET.fromstring(r.content)
-      # 获取标签名（去除可能存在的 XML Namespace，例如 {http://www.sitemaps.org/schemas/sitemap/0.9}sitemapindex）
       tag_name = root.tag.split("}")[-1].lower()
 
       if tag_name == "sitemapindex":
-        # 如果是子索引，递归解析其中的子 sitemap
         for loc in root.findall(
             ".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
         ):
           if loc.text:
             parse_sitemap(loc.text.strip())
-        # 兼容无 namespace 的情况
         for loc in root.findall(".//loc"):
-          if loc.text and loc.text.strip() not in sitemaps:
-            # 简单去重防止重复递归
-            pass
+          if loc.text:
+            parse_sitemap(loc.text.strip())
       elif tag_name == "urlset":
-        # 如果是具体的 url 集合，提取路径
         for loc in root.findall(
             ".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
         ):
@@ -82,11 +76,13 @@ def get_all_paths():
   for sm in sitemaps:
     parse_sitemap(sm)
 
-  # 3. 首页/站内页面递归爬取兜底补充
+  # 3. 深度递归爬取（扩大抓取量，确保捞出内页和深层文件）
   visited = set()
-  to_visit = {TARGET_URL}
+  # 把刚才 sitemap 拿到的路径转成完整 URL 作为后续深度递归的种子
+  to_visit = {urljoin(TARGET_URL, p) for p in all_paths}
+  to_visit.add(TARGET_URL)
 
-  while to_visit and len(visited) < 500:
+  while to_visit and len(visited) < 2000:  # 提高上限以捕捉更多深层页面
     curr = to_visit.pop()
     if curr in visited:
       continue
@@ -103,12 +99,28 @@ def get_all_paths():
         for a in soup.find_all("a", href=True):
           full_url = urljoin(curr, a["href"])
           p_url = urlparse(full_url)
-          if p_url.netloc == domain:  # 过滤外部域名
-            to_visit.add(full_url)
+          # 限制在同域名下，并且排除常见锚点或静态资源后缀
+          if p_url.netloc == domain:
+            path_lower = p_url.path.lower()
+            if not any(
+                path_lower.endswith(ext)
+                for ext in [
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".gif",
+                    ".css",
+                    ".js",
+                    ".ico",
+                    ".svg",
+                ]
+            ):
+              clean_url = f"{p_url.scheme}://{p_url.netloc}{p_url.path}"
+              if clean_url not in visited:
+                to_visit.add(clean_url)
     except Exception:
       continue
 
-  # 4. 统一、去重、排序
   return sorted(list(all_paths))
 
 
