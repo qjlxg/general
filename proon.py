@@ -1,10 +1,12 @@
-import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 import requests
+import os
+import uuid
 
 TARGET_URL = "https://pro-on.org"
-OUTPUT_FILE = "proton_paths.txt"
+OUTPUT_FILE = "proon_paths.txt"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
@@ -12,131 +14,212 @@ HEADERS = {
     )
 }
 
-# 需要过滤的静态资源后缀
-EXCLUDE_EXTENSIONS = (
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".css",
-    ".js",
-    ".ico",
-    ".svg",
-    ".webp",
-    ".woff",
-    ".woff2",
-    ".ttf",
-)
+# 兜底基础目录（当本地尚无历史资产文件时使用）
+FALLBACK_BASE_DIRS = [
+    "/",
+    "/app/",
+    "/vless/",
+    "/hiddify/",
+    "/vpn-android/",
+]
+
+# 细分类型的探测词汇
+DICTIONARY_WORDS = [
+    "login",
+    "admin",
+    "api",
+    "config",
+    "sitemap",
+    "robots",
+    "index",
+    "test",
+    "backup",
+    "download",
+    "feed",
+    "search",
+    "user",
+    "auth",
+    "settings",
+    "setup",
+]
+
+EXTENSIONS = ["", ".html", ".php", ".json", ".xml", ".txt", ".yaml", ".yml"]
 
 
-def get_all_paths():
-  all_paths = set()
-  domain = urlparse(TARGET_URL).netloc
+def load_dynamic_base_dirs():
+  """严格只加载以 / 结尾的明确目录型路径，防止路径树爆炸"""
+  dirs = set(FALLBACK_BASE_DIRS)
 
-  # 1. 解析 robots.txt
-  sitemaps = []
+  if os.path.exists(OUTPUT_FILE):
+    print(
+        f"[*] 发现历史路径资产文件 {OUTPUT_FILE}，正在安全加载明确的目录型底座..."
+    )
+    try:
+      with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+          path = line.strip()
+          if not path:
+            continue
+          # 核心安全控制：只有明确以 / 结尾的路径才作为下一轮目录底座
+          if path.endswith("/"):
+            dirs.add(path)
+      print(f"[*] 成功安全加载 {len(dirs)} 个有效目录作为探测基底。")
+    except Exception as e:
+      print(f"[!] 读取历史资产文件出错: {e}，将使用默认兜底目录。")
+  else:
+    print(
+        "[*] 未发现本地历史资产文件，使用默认兜底目录启动。"
+    )
+
+  return sorted(list(dirs))
+
+
+def get_soft_404_baseline():
+  """获取“软 404”基准特征"""
+  random_path = f"/__definitely_not_exist_{uuid.uuid4().hex[:8]}__/"
+  url = TARGET_URL.rstrip("/") + random_path
+  baseline = {
+      "status": 404,
+      "length": 0,
+      "title": "",
+      "text_snippet": "",
+      "location": "",
+  }
   try:
     r = requests.get(
-        urljoin(TARGET_URL, "/robots.txt"), headers=HEADERS, timeout=10
+        url, headers=HEADERS, timeout=5, allow_redirects=False, verify=True
     )
-    if r.status_code == 200:
-      sitemaps = [
-          line.split(":", 1)[1].strip()
-          for line in r.text.splitlines()
-          if line.lower().startswith("sitemap:")
-      ]
-  except Exception as e:
-    print(f"获取 robots.txt 失败: {e}")
+    baseline["status"] = r.status_code
+    baseline["length"] = len(r.content)
+    baseline["location"] = r.headers.get("Location", "")
 
-  if not sitemaps:
-    sitemaps = [
-        urljoin(TARGET_URL, "/sitemap.xml"),
-        urljoin(TARGET_URL, "/sitemap_index.xml"),
-    ]
-
-  # 2. 精确解析 Sitemap / Sitemap Index (带 visited_sitemaps 防止死循环)
-  visited_sitemaps = set()
-
-  def parse_sitemap(url):
-    if url in visited_sitemaps:
-      return
-    visited_sitemaps.add(url)
-
-    try:
-      r = requests.get(url, headers=HEADERS, timeout=10)
-      if r.status_code != 200:
-        print(f"Sitemap 请求异常 [{r.status_code}]: {url}")
-        return
-
-      root = ET.fromstring(r.content)
-      tag_name = root.tag.split("}")[-1].lower()
-
-      # 兼容带命名空间或不带命名空间的查找
-      loc_elements = root.findall(
-          ".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
+    if "text/html" in r.headers.get("Content-Type", "").lower():
+      soup = BeautifulSoup(r.text, "html.parser")
+      title = soup.title
+      baseline["title"] = (
+          title.get_text(" ", strip=True).lower() if title else ""
       )
-      if not loc_elements:
-        loc_elements = root.findall(".//loc")
+      baseline["text_snippet"] = r.text[:300].strip().lower()
+  except Exception:
+    pass
+  print(
+      f"[-] 软 404 基准校准完成 (状态码: {baseline['status']},"
+      f" 长度: {baseline['length']})"
+  )
+  return baseline
 
-      if tag_name == "sitemapindex":
-        for loc in loc_elements:
-          if loc.text:
-            parse_sitemap(loc.text.strip())
-      elif tag_name == "urlset":
-        for loc in loc_elements:
-          if loc.text:
-            parsed = urlparse(loc.text.strip())
-            if parsed.path:
-              all_paths.add(parsed.path)
-    except Exception as e:
-      print(f"Sitemap 解析错误 ({url}): {e}")
 
-  for sm in sitemaps:
-    parse_sitemap(sm)
+def generate_payloads(base_dirs):
+  """基于严格清洗后的目录矩阵组合字典和扩展名"""
+  payloads = set(base_dirs)
+  for base_dir in base_dirs:
+    clean_dir = base_dir if base_dir.endswith("/") else base_dir + "/"
+    for word in DICTIONARY_WORDS:
+      for ext in EXTENSIONS:
+        payloads.add(f"{clean_dir}{word}{ext}")
+  return sorted(list(payloads))
 
-  # 3. 深度递归爬取补充
-  visited = set()
-  to_visit = {urljoin(TARGET_URL, p) for p in all_paths}
-  to_visit.add(TARGET_URL)
 
-  while to_visit and len(visited) < 2000:
-    curr = to_visit.pop()
-    if curr in visited:
-      continue
-    visited.add(curr)
+def check_path(path, baseline):
+  """高精度、防误杀的路径确认逻辑"""
+  url = TARGET_URL.rstrip("/") + path
+  try:
+    r = requests.get(
+        url, headers=HEADERS, timeout=5, allow_redirects=False, verify=True
+    )
 
-    try:
-      r = requests.get(curr, headers=HEADERS, timeout=5)
-      parsed_curr = urlparse(curr)
-      if parsed_curr.path:
-        all_paths.add(parsed_curr.path)
+    if r.status_code in [404, 500, 502, 503, 504]:
+      return None
 
-      if "text/html" in r.headers.get("Content-Type", ""):
-        soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-          full_url = urljoin(curr, a["href"])
-          p_url = urlparse(full_url)
-          if p_url.netloc == domain:
-            path_lower = p_url.path.lower()
-            if not path_lower.endswith(EXCLUDE_EXTENSIONS):
-              clean_url = f"{p_url.scheme}://{p_url.netloc}{p_url.path}"
-              if clean_url not in visited:
-                to_visit.add(clean_url)
-    except Exception:
-      continue
+    if r.status_code in [301, 302, 303, 307, 308]:
+      location = r.headers.get("Location", "")
+      parsed_loc = urlparse(location)
+      loc_path = parsed_loc.path
 
-  # 4. 最终输出前统一清洗、去重、过滤静态资源并排序
-  final_paths = set()
-  for p in all_paths:
-    if not p.lower().endswith(EXCLUDE_EXTENSIONS):
-      final_paths.add(p)
+      if loc_path in ("", "/"):
+        return None
 
-  return sorted(list(final_paths))
+      baseline_loc_path = urlparse(baseline["location"]).path
+      if (
+          baseline["status"] in [301, 302, 303, 307, 308]
+          and loc_path == baseline_loc_path
+      ):
+        return None
+
+      if (
+          location.startswith("/")
+          or parsed_loc.netloc == urlparse(TARGET_URL).netloc
+      ):
+        return path
+      return None
+
+    if r.status_code == 403:
+      return path
+
+    if r.status_code == 200:
+      if baseline["status"] == 200:
+        current_length = len(r.content)
+        current_title = ""
+        current_snippet = r.text[:300].strip().lower()
+
+        if "text/html" in r.headers.get("Content-Type", "").lower():
+          soup = BeautifulSoup(r.text, "html.parser")
+          if soup.title:
+            current_title = soup.title.get_text(" ", strip=True).lower()
+
+        is_same_title = (
+            current_title and current_title == baseline["title"]
+        ) or (not current_title and not baseline["title"])
+        is_same_snippet = (
+            current_snippet == baseline["text_snippet"]
+            and len(current_snippet) > 50
+        )
+
+        if is_same_title and is_same_snippet:
+          return None
+
+      print(f"[发现有效目标] {path} (200)")
+      return path
+
+  except requests.RequestException:
+    pass
+
+  return None
+
+
+def run_fuzzing():
+  # 1. 严格只加载以 / 结尾的目录作为底座
+  base_dirs = load_dynamic_base_dirs()
+
+  # 2. 获取软 404 基准
+  baseline = get_soft_404_baseline()
+
+  # 3. 生成可控的探测矩阵
+  paths_to_test = generate_payloads(base_dirs)
+  print(
+      f"开始高精度防误杀深度探测：加载安全目录底座 {len(base_dirs)} 个，共生成"
+      f" {len(paths_to_test)} 个候选目标..."
+  )
+
+  # 初始化结果库，包含所有合法的历史目录
+  found_paths = set(base_dirs)
+
+  # 4. 并发执行高精度验证
+  with ThreadPoolExecutor(max_workers=20) as executor:
+    futures = {
+        executor.submit(check_path, p, baseline): p for p in paths_to_test
+    }
+    for future in as_completed(futures):
+      res = future.result()
+      if res:
+        found_paths.add(res)
+
+  return sorted(list(found_paths))
 
 
 if __name__ == "__main__":
-  result = get_all_paths()
+  result = run_fuzzing()
   with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     for p in result:
       f.write(p + "\n")
-  print(f"抓取完成，共精选有效路径 {len(result)} 个，已保存至 {OUTPUT_FILE}")
+  print(f"探测完成，最终产出纯净有效路径库 {len(result)} 个，已保存至 {OUTPUT_FILE}")
