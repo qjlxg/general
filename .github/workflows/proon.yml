@@ -1,0 +1,45 @@
+name: proon
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'proon.py'
+      - '.github/workflows/proon.yml'
+  schedule:
+    # 北京时间每天早上 8:00 自动运行（对应 UTC 时间 0:00）
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  run-proon:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: 运行抓取脚本
+        run: |
+          python proon.py
+
+      - name: 自动提交并推送变动
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add proon_paths.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update ProON paths [skip ci]" && git push)
