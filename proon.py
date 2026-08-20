@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import requests
 import os
@@ -19,6 +19,23 @@ HEADERS = {
     )
 }
 
+# 核心盲打字典（当页面无链接、无robots时，直接以此作为初始探测种子）
+CORE_SEEDS = [
+    "/",
+    "/app/",
+    "/api/",
+    "/config/",
+    "/vless/",
+    "/v2ray/",
+    "/hiddify/",
+    "/sub/",
+    "/downloads/",
+    "/backup/",
+    "/share/",
+    "/node/",
+    "/data/",
+]
+
 # 细分类型的探测词汇
 DICTIONARY_WORDS = [
     "login",
@@ -37,87 +54,80 @@ DICTIONARY_WORDS = [
     "auth",
     "settings",
     "setup",
+    "sub",
+    "list",
+    "pool",
 ]
 
 EXTENSIONS = ["", ".yaml", ".yam"]
 
 
-def crawl_real_paths_from_target(target_url):
-  """【核心突破】真正去浏览、解析目标网址的首页、robots.txt 和 sitemap.xml 提取真实路径"""
-  discovered_dirs = {"/"}
+def harvest_real_paths(target_url):
+  """多路资产收集：首页抓取 + robots/sitemap 尝试 + 历史沉淀"""
+  discovered_dirs = set(CORE_SEEDS)
   target_parsed = urlparse(target_url)
   base_netloc = target_parsed.netloc
 
-  print(f"[*] 正在真实浏览并抓取目标结构: {target_url}")
+  print(f"[*] 正在对目标进行全方位结构探测: {target_url}")
 
-  # 1. 抓取首页并提取所有同源链接
+  # 1. 尝试抓取首页超链接
   try:
-    r = requests.get(target_url, headers=HEADERS, timeout=8, verify=False)
+    r = requests.get(target_url, headers=HEADERS, timeout=6, verify=False)
     if r.status_code == 200:
       soup = BeautifulSoup(r.text, "html.parser")
       for tag in soup.find_all(["a", "link", "script"], href=True):
         href = tag.get("href")
         if href:
           full_url = urljoin(target_url, href)
-          parsed_full = urlparse(full_url)
-          # 确保是同源链接
-          if parsed_full.netloc == base_netloc:
-            path = parsed_full.path
-            if path:
-              # 如果是目录形式或不带后缀，提取其父目录
-              if path.endswith("/"):
-                discovered_dirs.add(path)
-              else:
-                dir_part = os.path.dirname(path) + "/"
-                if dir_part != "//":
-                  discovered_dirs.add(dir_part)
-  except Exception as e:
-    print(f"[!] 抓取首页链接出错 ({target_url}): {e}")
-
-  # 2. 尝试读取 robots.txt
-  try:
-    robots_url = target_url.rstrip("/") + "/robots.txt"
-    r = requests.get(robots_url, headers=HEADERS, timeout=5, verify=False)
-    if r.status_code == 200:
-      for line in r.text.splitlines():
-        if (
-            line.lower().startswith("allow:")
-            or line.lower().startswith("disallow:")
-            or line.lower().startswith("sitemap:")
-        ):
-          parts = line.split(":", 1)
-          if len(parts) > 1:
-            val = parts[1].strip()
-            if val.startswith("/"):
-              if val.endswith("/"):
-                discovered_dirs.add(val)
-              else:
-                discovered_dirs.add(os.path.dirname(val) + "/")
+          p_full = urlparse(full_url)
+          if p_full.netloc == base_netloc and p_full.path:
+            path = p_full.path
+            if path.endswith("/"):
+              discovered_dirs.add(path)
+            else:
+              dir_part = os.path.dirname(path) + "/"
+              if dir_part != "//":
+                discovered_dirs.add(dir_part)
   except Exception:
     pass
 
-  # 3. 尝试读取历史资产文件中属于该域名的有效目录（历史沉淀）
+  # 2. 尝试读取 robots.txt
+  try:
+    r = requests.get(
+        target_url.rstrip("/") + "/robots.txt",
+        headers=HEADERS,
+        timeout=4,
+        verify=False,
+    )
+    if r.status_code == 200:
+      for line in r.text.splitlines():
+        if ":" in line:
+          val = line.split(":", 1)[1].strip()
+          if val.startswith("/"):
+            discovered_dirs.add(
+                val if val.endswith("/") else os.path.dirname(val) + "/"
+            )
+  except Exception:
+    pass
+
+  # 3. 历史资产文件加载
   if os.path.exists(OUTPUT_FILE):
     try:
       with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
         for line in f:
-          line_str = line.strip()
-          if line_str:
-            p_u = urlparse(line_str)
+          l_str = line.strip()
+          if l_str:
+            p_u = urlparse(l_str)
             if p_u.netloc == base_netloc and p_u.path.endswith("/"):
               discovered_dirs.add(p_u.path)
     except Exception:
       pass
 
-  print(
-      f"[+] 通过真实浏览与解析，共为 {target_url} 发现"
-      f" {len(discovered_dirs)} 个真实底座目录。"
-  )
   return sorted(list(discovered_dirs))
 
 
 def get_soft_404_baseline(target_url):
-  """获取软 404 基准特征"""
+  """软 404 基准校准"""
   random_path = f"/__definitely_not_exist_{uuid.uuid4().hex[:8]}__/"
   url = target_url.rstrip("/") + random_path
   baseline = {
@@ -137,29 +147,16 @@ def get_soft_404_baseline(target_url):
 
     if "text/html" in r.headers.get("Content-Type", "").lower():
       soup = BeautifulSoup(r.text, "html.parser")
-      title = soup.title
-      baseline["title"] = (
-          title.get_text(" ", strip=True).lower() if title else ""
-      )
+      if soup.title:
+        baseline["title"] = soup.title.get_text(" ", strip=True).lower()
       baseline["text_snippet"] = r.text[:300].strip().lower()
   except Exception:
     pass
   return baseline
 
 
-def generate_payloads(base_dirs):
-  """基于真实发现的目录矩阵组合字典和 .yaml/.yam"""
-  payloads = set(base_dirs)
-  for base_dir in base_dirs:
-    clean_dir = base_dir if base_dir.endswith("/") else base_dir + "/"
-    for word in DICTIONARY_WORDS:
-      for ext in EXTENSIONS:
-        payloads.add(f"{clean_dir}{word}{ext}")
-  return sorted(list(payloads))
-
-
 def check_path(target_url, path, baseline):
-  """高精度路径验证"""
+  """高精度防误杀验证"""
   url = target_url.rstrip("/") + path
   try:
     r = requests.get(
@@ -173,17 +170,8 @@ def check_path(target_url, path, baseline):
       location = r.headers.get("Location", "")
       parsed_loc = urlparse(location)
       loc_path = parsed_loc.path
-
       if loc_path in ("", "/"):
         return None
-
-      baseline_loc_path = urlparse(baseline["location"]).path
-      if (
-          baseline["status"] in [301, 302, 303, 307, 308]
-          and loc_path == baseline_loc_path
-      ):
-        return None
-
       if (
           location.startswith("/")
           or parsed_loc.netloc == urlparse(target_url).netloc
@@ -198,21 +186,16 @@ def check_path(target_url, path, baseline):
       if baseline["status"] == 200:
         current_title = ""
         current_snippet = r.text[:300].strip().lower()
-
         if "text/html" in r.headers.get("Content-Type", "").lower():
           soup = BeautifulSoup(r.text, "html.parser")
           if soup.title:
             current_title = soup.title.get_text(" ", strip=True).lower()
 
-        is_same_title = (
-            current_title and current_title == baseline["title"]
-        ) or (not current_title and not baseline["title"])
-        is_same_snippet = (
-            current_snippet == baseline["text_snippet"]
+        if (
+            current_title == baseline["title"]
+            and current_snippet == baseline["text_snippet"]
             and len(current_snippet) > 50
-        )
-
-        if is_same_title and is_same_snippet:
+        ):
           return None
 
       print(f"[发现有效目标] {target_url} -> {path} (200)")
@@ -225,28 +208,47 @@ def check_path(target_url, path, baseline):
 
 
 def scan_target(target_url):
-  # 1. 真正去浏览抓取目标网站的真实目录
-  base_dirs = crawl_real_paths_from_target(target_url)
+  # 1. 搜集基础种子目录（即使没 robots 也能靠 CORE_SEEDS 盲打）
+  base_dirs = harvest_real_paths(target_url)
   baseline = get_soft_404_baseline(target_url)
-  paths_to_test = generate_payloads(base_dirs)
 
-  print(
-      f"[-] 开始深度探测：基于真实发现的 {len(base_dirs)} 个目录，生成"
-      f" {len(paths_to_test)} 个候选..."
-  )
-
+  # 2. 多轮递归探测（确保即使网站结构隐藏得很深也能一层层剥开）
   found_paths = set(base_dirs)
+  current_bases = base_dirs
 
-  with ThreadPoolExecutor(max_workers=20) as executor:
-    futures = {
-        executor.submit(check_path, target_url, p, baseline): p
-        for p in paths_to_test
-    }
-    for future in as_completed(futures):
-      res = future.result()
-      if res:
-        found_paths.add(res)
+  for round_idx in range(2):  # 最多进行 2 轮递归
+    print(
+        f"[*] 开启第 {round_idx + 1} 轮探测，当前基底目录数:"
+        f" {len(current_bases)}"
+    )
 
+    payloads = set()
+    for b in current_bases:
+      clean_b = b if b.endswith("/") else b + "/"
+      for w in DICTIONARY_WORDS:
+        for ext in EXTENSIONS:
+          payloads.add(f"{clean_b}{w}{ext}")
+
+    new_discovered_dirs = set()
+    with ThreadPoolExecutor(max_workers=20) as executor:
+      futures = {
+          executor.submit(check_path, target_url, p, baseline): p
+          for p in payloads
+      }
+      for future in as_completed(futures):
+        res = future.result()
+        if res:
+          found_paths.add(res)
+          # 如果新发现的路径是个目录（以 / 结尾），加入下一轮递归队列
+          if res.endswith("/"):
+            new_discovered_dirs.add(res)
+
+    # 把新发现的目录作为下一轮的基底
+    if not new_discovered_dirs:
+      break
+    current_bases = sorted(list(new_discovered_dirs))
+
+  # 3. 统一格式化过滤：仅保留目录或 .yaml / .yam 格式的完整链接
   valid_urls = []
   for p in found_paths:
     if p.endswith("/") or p.endswith(".yaml") or p.endswith(".yam"):
@@ -275,6 +277,6 @@ if __name__ == "__main__":
       f.write(url_item + "\n")
 
   print(
-      f"\n[+] 所有目标探测完成！总计产出有效完整 URL 库 {len(final_urls)}"
-      f" 个，已保存至 {OUTPUT_FILE}"
+      f"\n[+] 探测完成！总计产出有效完整 URL 库 {len(final_urls)} 个，已保存至"
+      f" {OUTPUT_FILE}"
   )
