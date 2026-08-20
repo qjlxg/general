@@ -12,6 +12,22 @@ HEADERS = {
     )
 }
 
+# 需要过滤的静态资源后缀
+EXCLUDE_EXTENSIONS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".css",
+    ".js",
+    ".ico",
+    ".svg",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".ttf",
+)
+
 
 def get_all_paths():
   all_paths = set()
@@ -29,8 +45,8 @@ def get_all_paths():
           for line in r.text.splitlines()
           if line.lower().startswith("sitemap:")
       ]
-  except Exception:
-    pass
+  except Exception as e:
+    print(f"获取 robots.txt 失败: {e}")
 
   if not sitemaps:
     sitemaps = [
@@ -38,51 +54,52 @@ def get_all_paths():
         urljoin(TARGET_URL, "/sitemap_index.xml"),
     ]
 
-  # 2. 精确解析 Sitemap / Sitemap Index
+  # 2. 精确解析 Sitemap / Sitemap Index (带 visited_sitemaps 防止死循环)
+  visited_sitemaps = set()
+
   def parse_sitemap(url):
+    if url in visited_sitemaps:
+      return
+    visited_sitemaps.add(url)
+
     try:
       r = requests.get(url, headers=HEADERS, timeout=10)
       if r.status_code != 200:
+        print(f"Sitemap 请求异常 [{r.status_code}]: {url}")
         return
 
       root = ET.fromstring(r.content)
       tag_name = root.tag.split("}")[-1].lower()
 
+      # 兼容带命名空间或不带命名空间的查找
+      loc_elements = root.findall(
+          ".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
+      )
+      if not loc_elements:
+        loc_elements = root.findall(".//loc")
+
       if tag_name == "sitemapindex":
-        for loc in root.findall(
-            ".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
-        ):
-          if loc.text:
-            parse_sitemap(loc.text.strip())
-        for loc in root.findall(".//loc"):
+        for loc in loc_elements:
           if loc.text:
             parse_sitemap(loc.text.strip())
       elif tag_name == "urlset":
-        for loc in root.findall(
-            ".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
-        ):
+        for loc in loc_elements:
           if loc.text:
             parsed = urlparse(loc.text.strip())
             if parsed.path:
               all_paths.add(parsed.path)
-        for loc in root.findall(".//loc"):
-          if loc.text:
-            parsed = urlparse(loc.text.strip())
-            if parsed.path:
-              all_paths.add(parsed.path)
-    except Exception:
-      pass
+    except Exception as e:
+      print(f"Sitemap 解析错误 ({url}): {e}")
 
   for sm in sitemaps:
     parse_sitemap(sm)
 
-  # 3. 深度递归爬取（扩大抓取量，确保捞出内页和深层文件）
+  # 3. 深度递归爬取补充
   visited = set()
-  # 把刚才 sitemap 拿到的路径转成完整 URL 作为后续深度递归的种子
   to_visit = {urljoin(TARGET_URL, p) for p in all_paths}
   to_visit.add(TARGET_URL)
 
-  while to_visit and len(visited) < 2000:  # 提高上限以捕捉更多深层页面
+  while to_visit and len(visited) < 2000:
     curr = to_visit.pop()
     if curr in visited:
       continue
@@ -99,29 +116,22 @@ def get_all_paths():
         for a in soup.find_all("a", href=True):
           full_url = urljoin(curr, a["href"])
           p_url = urlparse(full_url)
-          # 限制在同域名下，并且排除常见锚点或静态资源后缀
           if p_url.netloc == domain:
             path_lower = p_url.path.lower()
-            if not any(
-                path_lower.endswith(ext)
-                for ext in [
-                    ".png",
-                    ".jpg",
-                    ".jpeg",
-                    ".gif",
-                    ".css",
-                    ".js",
-                    ".ico",
-                    ".svg",
-                ]
-            ):
+            if not path_lower.endswith(EXCLUDE_EXTENSIONS):
               clean_url = f"{p_url.scheme}://{p_url.netloc}{p_url.path}"
               if clean_url not in visited:
                 to_visit.add(clean_url)
     except Exception:
       continue
 
-  return sorted(list(all_paths))
+  # 4. 最终输出前统一清洗、去重、过滤静态资源并排序
+  final_paths = set()
+  for p in all_paths:
+    if not p.lower().endswith(EXCLUDE_EXTENSIONS):
+      final_paths.add(p)
+
+  return sorted(list(final_paths))
 
 
 if __name__ == "__main__":
@@ -129,4 +139,4 @@ if __name__ == "__main__":
   with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     for p in result:
       f.write(p + "\n")
-  print(f"抓取完成，共 {len(result)} 个路径，已保存至 {OUTPUT_FILE}")
+  print(f"抓取完成，共精选有效路径 {len(result)} 个，已保存至 {OUTPUT_FILE}")
