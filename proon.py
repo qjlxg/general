@@ -5,7 +5,13 @@ import requests
 import os
 import uuid
 
-TARGET_URL = "https://pro-on.org"
+# 1. 在这里配置你的所有目标源（支持域名、IP加端口等）
+TARGET_URLS = [
+    "https://pro-on.org",
+    "http://8.218.196.8:80",
+    "http://8.211.135.202/",
+]
+
 OUTPUT_FILE = "proon_paths.txt"
 HEADERS = {
     "User-Agent": (
@@ -14,7 +20,7 @@ HEADERS = {
     )
 }
 
-# 兜底基础目录（当本地尚无历史资产文件时使用）
+# 兜底基础目录
 FALLBACK_BASE_DIRS = [
     "/",
     "/app/",
@@ -43,49 +49,46 @@ DICTIONARY_WORDS = [
     "setup",
 ]
 
-# 严格收窄：只允许 .yaml 和 .yam 后缀（空字符串用于保留目录底座）
+# 严格收窄：只允许 .yaml 和 .yam 后缀
 EXTENSIONS = ["", ".yaml", ".yam"]
 
 
-def load_dynamic_base_dirs():
-  """安全加载明确的目录型底座（支持完整 URL 或相对路径的兼容读取）"""
+def load_dynamic_base_dirs(target_url):
+  """针对特定目标安全加载历史资产中的对应目录"""
   dirs = set(FALLBACK_BASE_DIRS)
+  parsed_target = urlparse(target_url)
+  target_netloc = parsed_target.netloc
 
   if os.path.exists(OUTPUT_FILE):
-    print(
-        f"[*] 发现历史路径资产文件 {OUTPUT_FILE}，正在安全加载明确的目录型底座..."
-    )
     try:
       with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
         for line in f:
           line_str = line.strip()
           if not line_str:
             continue
-          # 兼容处理：如果是完整 URL，提取出它的 path 部分
+          # 如果是完整 URL，先解析
           if line_str.startswith("http://") or line_str.startswith(
               "https://"
           ):
             parsed_u = urlparse(line_str)
-            path = parsed_u.path
+            # 只提取属于当前目标域名的路径，避免不同目标混淆
+            if parsed_u.netloc == target_netloc:
+              path = parsed_u.path
+              if path.endswith("/"):
+                dirs.add(path)
           else:
-            path = line_str
-
-          # 只有明确以 / 结尾的路径才作为下一轮目录底座
-          if path.endswith("/"):
-            dirs.add(path)
-      print(f"[*] 成功安全加载 {len(dirs)} 个有效目录作为探测基底。")
+            if line_str.endswith("/"):
+              dirs.add(line_str)
     except Exception as e:
       print(f"[!] 读取历史资产文件出错: {e}，将使用默认兜底目录。")
-  else:
-    print("[*] 未发现本地历史资产文件，使用默认兜底目录启动。")
 
   return sorted(list(dirs))
 
 
-def get_soft_404_baseline():
-  """获取“软 404”基准特征"""
+def get_soft_404_baseline(target_url):
+  """获取指定目标的“软 404”基准特征"""
   random_path = f"/__definitely_not_exist_{uuid.uuid4().hex[:8]}__/"
-  url = TARGET_URL.rstrip("/") + random_path
+  url = target_url.rstrip("/") + random_path
   baseline = {
       "status": 404,
       "length": 0,
@@ -95,7 +98,7 @@ def get_soft_404_baseline():
   }
   try:
     r = requests.get(
-        url, headers=HEADERS, timeout=5, allow_redirects=False, verify=True
+        url, headers=HEADERS, timeout=5, allow_redirects=False, verify=False
     )
     baseline["status"] = r.status_code
     baseline["length"] = len(r.content)
@@ -110,15 +113,11 @@ def get_soft_404_baseline():
       baseline["text_snippet"] = r.text[:300].strip().lower()
   except Exception:
     pass
-  print(
-      f"[-] 软 404 基准校准完成 (状态码: {baseline['status']},"
-      f" 长度: {baseline['length']})"
-  )
   return baseline
 
 
 def generate_payloads(base_dirs):
-  """基于严格清洗后的目录矩阵组合字典和 .yaml/.yam 后缀"""
+  """生成探测矩阵"""
   payloads = set(base_dirs)
   for base_dir in base_dirs:
     clean_dir = base_dir if base_dir.endswith("/") else base_dir + "/"
@@ -128,12 +127,12 @@ def generate_payloads(base_dirs):
   return sorted(list(payloads))
 
 
-def check_path(path, baseline):
+def check_path(target_url, path, baseline):
   """高精度、防误杀的路径确认逻辑"""
-  url = TARGET_URL.rstrip("/") + path
+  url = target_url.rstrip("/") + path
   try:
     r = requests.get(
-        url, headers=HEADERS, timeout=5, allow_redirects=False, verify=True
+        url, headers=HEADERS, timeout=5, allow_redirects=False, verify=False
     )
 
     if r.status_code in [404, 500, 502, 503, 504]:
@@ -156,7 +155,7 @@ def check_path(path, baseline):
 
       if (
           location.startswith("/")
-          or parsed_loc.netloc == urlparse(TARGET_URL).netloc
+          or parsed_loc.netloc == urlparse(target_url).netloc
       ):
         return path
       return None
@@ -185,7 +184,7 @@ def check_path(path, baseline):
         if is_same_title and is_same_snippet:
           return None
 
-      print(f"[发现有效目标] {path} (200)")
+      print(f"[发现有效目标] {target_url} -> {path} (200)")
       return path
 
   except requests.RequestException:
@@ -194,46 +193,60 @@ def check_path(path, baseline):
   return None
 
 
-def run_fuzzing():
-  base_dirs = load_dynamic_base_dirs()
-  baseline = get_soft_404_baseline()
+def scan_target(target_url):
+  """对单个目标执行完整的探测流程"""
+  print(f"\n[*] 开始探测目标: {target_url}")
+  base_dirs = load_dynamic_base_dirs(target_url)
+  baseline = get_soft_404_baseline(target_url)
   paths_to_test = generate_payloads(base_dirs)
+
   print(
-      f"开始高精度防误杀深度探测：加载安全目录底座 {len(base_dirs)} 个，共生成"
-      f" {len(paths_to_test)} 个候选目标..."
+      f"[-] {target_url} 加载底座 {len(base_dirs)} 个，生成候选"
+      f" {len(paths_to_test)} 个..."
   )
 
   found_paths = set(base_dirs)
 
   with ThreadPoolExecutor(max_workers=20) as executor:
     futures = {
-        executor.submit(check_path, p, baseline): p for p in paths_to_test
+        executor.submit(check_path, target_url, p, baseline): p
+        for p in paths_to_test
     }
     for future in as_completed(futures):
       res = future.result()
       if res:
         found_paths.add(res)
 
-  return sorted(list(found_paths))
+  # 格式化并筛选结果：仅保留目录或 .yaml/.yam，并转为完整 URL
+  valid_urls = []
+  for p in found_paths:
+    if p.endswith("/") or p.endswith(".yaml") or p.endswith(".yam"):
+      full_url = target_url.rstrip("/") + (p if p.startswith("/") else "/" + p)
+      valid_urls.append(full_url)
+
+  return valid_urls
 
 
 if __name__ == "__main__":
-  raw_results = run_fuzzing()
+  import urllib3
 
-  # 过滤规则：只保留目录型路径（以 / 结尾）或者以 .yaml / .yam 结尾的完整链接
-  filtered_results = []
-  for p in raw_results:
-    if p.endswith("/") or p.endswith(".yaml") or p.endswith(".yam"):
-      # 统一拼接转换成完整的绝对 URL 输出
-      full_url = TARGET_URL.rstrip("/") + (p if p.startswith("/") else "/" + p)
-      filtered_results.append(full_url)
+  urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-  # 写入文件
+  all_results = []
+  for target in TARGET_URLS:
+    try:
+      res = scan_target(target)
+      all_results.extend(res)
+    except Exception as e:
+      print(f"[!] 目标 {target} 探测出错: {e}")
+
+  # 去重并写入文件
+  final_urls = sorted(list(set(all_results)))
   with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-    for url_item in sorted(list(set(filtered_results))):
+    for url_item in final_urls:
       f.write(url_item + "\n")
 
   print(
-      f"探测完成，最终产出纯净有效完整 URL 库 {len(filtered_results)}"
-      f" 个（仅保留目录及 .yaml/.yam），已保存至 {OUTPUT_FILE}"
+      f"\n[+] 所有目标探测完成！总计产出有效完整 URL 库 {len(final_urls)}"
+      f" 个，已保存至 {OUTPUT_FILE}"
   )
