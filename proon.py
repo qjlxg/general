@@ -1,4 +1,5 @@
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse, urljoin
 import requests
 import urllib3
 
@@ -32,23 +33,14 @@ FINGERPRINTS = [
     "hiddify",
 ]
 
-COMMON_PATHS = [
-    "",
-    "/config.yaml",
-    "/sub",
-    "/api/v1/client/subscribe",
-    "/clash/config",
-    "/api/v1/client/subscribe?token=",
-]
 
-
-def audit_and_expand_target(target_url):
-  print(f"[*] 正在对目标进行 FOFA 式指纹审计: {target_url}")
+def audit_and_extract_real_links(target_url):
+  print(f"[*] 正在对目标进行深度指纹审计与链接提取: {target_url}")
   valid_endpoints = set()
   base_url = target_url.rstrip("/")
 
   try:
-    r = requests.get(base_url, headers=HEADERS, timeout=8, verify=False)
+    r = requests.get(base_url + "/", headers=HEADERS, timeout=8, verify=False)
     if r.status_code not in [200, 403]:
       print(f"[-] 目标 {target_url} 状态码异常 ({r.status_code})，跳过。")
       return valid_endpoints
@@ -56,10 +48,20 @@ def audit_and_expand_target(target_url):
     content_text = r.text.lower()
     headers_text = str(r.headers).lower()
     title_text = ""
-    if "text/html" in r.headers.get("Content-Type", "").lower():
+    
+    content_type = r.headers.get("Content-Type", "").lower()
+    if "text/html" in content_type:
       soup = BeautifulSoup(r.text, "html.parser")
       if soup.title:
         title_text = soup.title.get_text(" ", strip=True).lower()
+
+      for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+        full_link = urljoin(base_url, href)
+        parsed_full = urlparse(full_link)
+        parsed_base = urlparse(base_url)
+        if parsed_full.netloc == parsed_base.netloc:
+          valid_endpoints.add(full_link)
 
     matched = False
     for fp in FINGERPRINTS:
@@ -73,9 +75,8 @@ def audit_and_expand_target(target_url):
         break
 
     if matched:
-      print(f"[+] 【命中指纹】{target_url} 匹配成功，开始衍生扩展路径...")
-      for p in COMMON_PATHS:
-        valid_endpoints.add(base_url + p)
+      print(f"[+] 【命中指纹】{base_url}/ 匹配成功，已收录根目录及提取站内真实链接")
+      valid_endpoints.add(base_url + "/")
     else:
       print(f"[-] 目标 {target_url} 未检测到代理/订阅指纹特征。")
 
@@ -89,7 +90,7 @@ if __name__ == "__main__":
   all_valid_urls = set()
 
   for target in TARGET_URLS:
-    endpoints = audit_and_expand_target(target)
+    endpoints = audit_and_extract_real_links(target)
     all_valid_urls.update(endpoints)
 
   final_urls = sorted(list(all_valid_urls))
@@ -98,6 +99,6 @@ if __name__ == "__main__":
       f.write(url + "\n")
 
   print(
-      f"\n[+] FOFA 式指纹审计与路径扩展完成！共生成 {len(final_urls)}"
-      f" 个精准候选链接，已保存至 {OUTPUT_FILE}"
+      f"\n[+] 审计完成！共生成 {len(final_urls)}"
+      f" 个真实有效的候选链接，已保存至 {OUTPUT_FILE}"
   )
