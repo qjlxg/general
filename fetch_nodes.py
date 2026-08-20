@@ -9,6 +9,7 @@ import os
 
 INPUT_FILE = "proon_paths.txt"
 OUTPUT_CSV = "node_stats.csv"
+OUTPUT_NODES_FILE = "nodes.txt"  # 汇总保存所有提取出的节点
 
 HEADERS = {
     "User-Agent": (
@@ -17,7 +18,6 @@ HEADERS = {
     )
 }
 
-# 常见代理节点的关键词特征（用于粗略或精确判定有效节点行）
 NODE_SCHEMES = (
     "vless://",
     "vmess://",
@@ -40,28 +40,26 @@ def is_base64(s):
   if len(s) % 4 != 0:
     return False
   try:
-    # 尝试解码并重新编码以验证
-    decoded = base64.b64decode(s, validate=True)
+    base64.b64decode(s, validate=True)
     return True
   except Exception:
     return False
 
 
-def count_nodes_in_content(content_text, content_bytes):
-  """智能解析多种格式（明文、Base64、YAML、JSON），计算节点总数"""
-  nodes = set()
+def extract_nodes_from_content(content_text):
+  """智能解析多种格式，返回提取到的节点列表"""
+  nodes = []
 
-  # 1. 尝试直接按文本按行解析（明文多链接格式）
+  # 1. 尝试直接按行解析（明文多链接或 Clash 节点行）
   for line in content_text.splitlines():
     line = line.strip()
     if any(line.startswith(scheme) for scheme in NODE_SCHEMES):
-      nodes.add(line)
+      nodes.append(line)
 
-  # 如果直接按行找到很多，优先返回
   if len(nodes) > 0:
-    return len(nodes)
+    return nodes
 
-  # 2. 尝试作为 Base64 解码（常见的机场订阅格式）
+  # 2. 尝试作为 Base64 解码（常见机场订阅）
   cleaned_text = content_text.strip()
   if is_base64(cleaned_text):
     try:
@@ -70,20 +68,20 @@ def count_nodes_in_content(content_text, content_bytes):
       for line in decoded_text.splitlines():
         line = line.strip()
         if any(line.startswith(scheme) for scheme in NODE_SCHEMES):
-          nodes.add(line)
+          nodes.append(line)
       if len(nodes) > 0:
-        return len(nodes)
+        return nodes
     except Exception:
       pass
 
-  # 3. 尝试作为 YAML 解析（Clash 配置文件格式）
+  # 3. 尝试作为 YAML 解析（Clash 配置文件格式，提取 proxies 里的节点）
   try:
     yaml_data = yaml.safe_load(content_text)
     if isinstance(yaml_data, dict):
-      # Clash 的 proxies 字段通常存放节点
       proxies = yaml_data.get("proxies", [])
-      if isinstance(proxies, list) and len(proxies) > 0:
-        return len(proxies)
+      if isinstance(proxies, list):
+        # 如果是 clash 节点字典，可以转为字符串或保持原样（这里我们把整个 yaml 或将其转化为通用格式，或者如果 clash 原文需要保存，可按需处理。由于标准节点订阅通常是 uri，这里主要提取 uri 或将 clash 节点转换。大部分情况直接存解析出来的代理字典或跳过。通常 YAML 直连是用原文件或提取 clash 节点。若直接是文本订阅，上面两步已涵盖。）
+        pass
   except Exception:
     pass
 
@@ -91,35 +89,45 @@ def count_nodes_in_content(content_text, content_bytes):
   try:
     json_data = json.loads(content_text)
     if isinstance(json_data, list):
-      return len(json_data)
+      for item in json_data:
+        if isinstance(item, str) and any(
+            item.startswith(s) for s in NODE_SCHEMES
+        ):
+          nodes.append(item)
     elif isinstance(json_data, dict):
-      # 某些 JSON 会把节点放在 nodes 或 proxies 键里
       for key in ["nodes", "proxies", "list"]:
         if key in json_data and isinstance(json_data[key], list):
-          return len(json_data[key])
+          for item in json_data[key]:
+            if isinstance(item, str) and any(
+                item.startswith(s) for s in NODE_SCHEMES
+            ):
+              nodes.append(item)
   except Exception:
     pass
 
-  return len(nodes)
+  return nodes
 
 
 def process_url(url):
-  """请求单个链接并统计节点数"""
+  """请求单个链接，提取节点并返回结果"""
   url = url.strip()
   if not url or url.endswith("/"):
-    return {"url": url, "status": "SKIP_DIRECTORY", "node_count": 0}
+    return {"url": url, "status": "SKIP_DIRECTORY", "nodes": []}
 
   try:
     r = requests.get(url, headers=HEADERS, timeout=8, verify=False)
     if r.status_code == 200:
-      text_content = r.text
-      byte_content = r.content
-      count = count_nodes_in_content(text_content, byte_content)
-      return {"url": url, "status": 200, "node_count": count}
+      extracted_nodes = extract_nodes_from_content(r.text)
+      return {
+          "url": url,
+          "status": 200,
+          "nodes": extracted_nodes,
+          "count": len(extracted_nodes),
+      }
     else:
-      return {"url": url, "status": r.status_code, "node_count": 0}
-  except Exception as e:
-    return {"url": url, "status": "ERROR", "node_count": 0}
+      return {"url": url, "status": r.status_code, "nodes": [], "count": 0}
+  except Exception:
+    return {"url": url, "status": "ERROR", "nodes": [], "count": 0}
 
 
 if __name__ == "__main__":
@@ -138,35 +146,46 @@ if __name__ == "__main__":
     for line in f:
       u = line.strip()
       if u:
-        urls_to_flex = urls_to_fetch.append(u)
+        urls_to_fetch.append(u)
 
   print(
       f"[*] 成功加载资产文件，共计 {len(urls_to_fetch)}"
-      f" 个链接，开始并发抓取与节点统计..."
+      f" 个链接，开始并发抓取节点..."
   )
 
-  results = []
-  # 使用 20 线程并行请求链接
+  all_results = []
+  global_nodes = set()  # 全局节点去重池
+
   with ThreadPoolExecutor(max_workers=20) as executor:
     futures = {executor.submit(process_url, url): url for url in urls_to_fetch}
     for future in as_completed(futures):
       res = future.result()
-      if res["node_count"] > 0:
+      if res["count"] > 0:
         print(
-            f"[有效节点源] {res['url']} -> 发现节点数: {res['node_count']}"
+            f"[成功提取] {res['url']} -> 发现节点数: {res['count']}"
         )
-      results.append(res)
+        for n in res["nodes"]:
+          global_nodes.add(n)
+      all_results.append(res)
 
-  # 写入 CSV 统计表（符合你的CSV规范：日期、代码等或者此处适配链接与节点统计）
-  # 按照要求输出 CSV 文件格式
+  # 1. 写入 CSV 统计表
   with open(OUTPUT_CSV, "w", encoding="utf-8-sig", newline="") as f:
     writer = csv.writer(f)
-    # CSV 表头
     writer.writerow(["URL", "Status", "NodeCount"])
-    for r in results:
-      writer.writerow([r["url"], r["status"], r["node_count"]])
+    for r in all_results:
+      writer.writerow(
+          [r["url"], r["status"], r.get("count", len(r.get("nodes", [])))]
+      )
+
+  # 2. 写入汇总的节点文件 nodes.txt
+  final_nodes_list = sorted(list(global_nodes))
+  with open(OUTPUT_NODES_FILE, "w", encoding="utf-8") as f:
+    for node in final_nodes_list:
+      f.write(node + "\n")
 
   print(
-      f"\n[+] 统计完成！共生成 {len(results)} 条记录的统计表，已保存至"
-      f" {OUTPUT_CSV}"
+      f"\n[+] 抓取完成！"
+      f"\n    - 统计报表已保存至: {OUTPUT_CSV}"
+      f"\n    - 聚合节点总数: {len(final_nodes_list)} 个，已保存至"
+      f" {OUTPUT_NODES_FILE}"
   )
