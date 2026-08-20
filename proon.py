@@ -1,105 +1,68 @@
-import os
-from urllib.parse import urljoin, urlparse
-from bs4 import BeautifulSoup
 import requests
 import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 
-# 目标网站：Proton 官网
 TARGET_URL = "https://pro-on.org"
-OUTPUT_FILE = "proon_paths.txt"
+OUTPUT_FILE = "proton_paths.txt"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+}
 
+def get_all_paths():
+    all_paths = set()
+    domain = urlparse(TARGET_URL).netloc
 
-def get_paths_from_sitemap(base_url, headers):
-  """尝试从网站的 sitemap.xml 中直接提取所有路径"""
-  sitemap_urls = [
-      urljoin(base_url, "/sitemap.xml"),
-      urljoin(base_url, "/sitemap_index.xml"),
-  ]
-  paths = set()
-
-  for sitemap_url in sitemap_urls:
+    # 1. 从 robots.txt 发现 Sitemap
     try:
-      response = requests.get(sitemap_url, headers=headers, timeout=10)
-      if response.status_code == 200:
-        print(f"发现并解析 Sitemap: {sitemap_url}")
-        root = ET.fromstring(response.content)
-        for elem in root.iter():
-          if elem.tag.endswith("loc"):
-            if elem.text:
-              parsed = urlparse(elem.text.strip())
-              if parsed.path:
-                paths.add(parsed.path)
-    except Exception as e:
-      print(f"Sitemap 解析跳过 {sitemap_url}: {e}")
+        r = requests.get(urljoin(TARGET_URL, "/robots.txt"), headers=HEADERS, timeout=10)
+        sitemaps = [line.split(":", 1)[1].strip() for line in r.text.splitlines() if line.lower().startswith("sitemap:")]
+    except:
+        sitemaps = [urljoin(TARGET_URL, "/sitemap.xml")]
 
-  return paths
+    # 2. 递归解析 Sitemap Index 和所有 sitemap
+    def parse_sitemap(url):
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            root = ET.fromstring(r.content)
+            # 处理 sitemapindex
+            for loc in root.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"):
+                if "sitemap" in loc.text and "xml" in loc.text:
+                    parse_sitemap(loc.text)
+                else:
+                    all_paths.add(urlparse(loc.text).path)
+        except: pass
 
+    for sm in sitemaps:
+        parse_sitemap(sm)
 
-def crawl_site(start_url, headers):
-  """递归深度爬取"""
-  visited = set()
-  to_visit = {start_url}
-  domain = urlparse(start_url).netloc
-  paths = set()
+    # 3. 首页/站内页面递归爬取 & 4. 提取 href & 5. 过滤外部域名
+    visited = set()
+    to_visit = {TARGET_URL}
+    
+    while to_visit and len(visited) < 500:
+        curr = to_visit.pop()
+        if curr in visited: continue
+        visited.add(curr)
+        
+        try:
+            r = requests.get(curr, headers=HEADERS, timeout=5)
+            all_paths.add(urlparse(curr).path)
+            if "text/html" in r.headers.get("Content-Type", ""):
+                soup = BeautifulSoup(r.text, "html.parser")
+                for a in soup.find_all("a", href=True):
+                    full_url = urljoin(curr, a["href"])
+                    p_url = urlparse(full_url)
+                    if p_url.netloc == domain: # 过滤外部域名
+                        to_visit.add(full_url)
+        except: continue
 
-  print(f"开始递归深度抓取: {start_url}")
-
-  while to_visit and len(visited) < 1000:  # 限制上限防止过大
-    current_url = to_visit.pop()
-    if current_url in visited:
-      continue
-    visited.add(current_url)
-
-    parsed_url = urlparse(current_url)
-    if parsed_url.path:
-      paths.add(parsed_url.path)
-
-    try:
-      response = requests.get(
-          current_url, headers=headers, timeout=10, verify=True
-      )
-      if response.status_code != 200:
-        continue
-
-      if "text/html" in response.headers.get("Content-Type", ""):
-        soup = BeautifulSoup(response.text, "html.parser")
-        for link in soup.find_all("a", href=True):
-          absolute_url = urljoin(current_url, link["href"])
-          p_url = urlparse(absolute_url)
-
-          if p_url.netloc == domain:
-            clean_url = f"{p_url.scheme}://{p_url.netloc}{p_url.path}"
-            if clean_url not in visited:
-              to_visit.add(clean_url)
-    except Exception as e:
-      print(f"抓取出错 {current_url}: {e}")
-
-  return paths
-
+    # 6. 统一 URL & 7. 全局去重 & 8. 排序
+    return sorted(list(all_paths))
 
 if __name__ == "__main__":
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-          " like Gecko) Chrome/122.0.0.0 Safari/537.36"
-      ),
-      "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
-  }
-
-  # 1. 优先通过 Sitemap 获取全量路径
-  all_paths = get_paths_from_sitemap(TARGET_URL, headers)
-
-  # 2. 结合页面递归爬取补充
-  scraped_paths = crawl_site(TARGET_URL, headers)
-  all_paths.update(scraped_paths)
-
-  # 确保根目录存在
-  all_paths.add("/")
-
-  sorted_paths = sorted(list(all_paths))
-
-  with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-    for path in sorted_paths:
-      f.write(path + "\n")
-
-  print(f"抓取完成，共找到 {len(sorted_paths)} 个路径，已保存至 {OUTPUT_FILE}")
+    result = get_all_paths()
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        for p in result:
+            f.write(p + "\n")
+    print(f"抓取完成，共 {len(result)} 个路径，已保存至 {OUTPUT_FILE}")
