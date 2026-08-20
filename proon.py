@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import requests
 
 # 目标网站地址（如有需要，可修改此处网址）
-TARGET_URL = "https://example.com"
+TARGET_URL = "https://pro-on.org"
 OUTPUT_FILE = "proon_paths.txt"
 
 
