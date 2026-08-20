@@ -1,16 +1,13 @@
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import urllib3
+import os
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-TARGET_URLS = [
-    "https://pro-on.org",
-    "http://8.218.196.8:80",
-    "http://8.211.135.202/",
-]
-
+TARGETS_FILE = "targets.txt"
 OUTPUT_FILE = "proon_paths.txt"
 HEADERS = {
     "User-Agent": (
@@ -34,15 +31,29 @@ FINGERPRINTS = [
 ]
 
 
+def format_target_url(raw_target):
+  raw_target = raw_target.strip()
+  if not raw_target:
+    return []
+  
+  urls = []
+  if not raw_target.startswith("http://") and not raw_target.startswith("https://"):
+    # 纯 IP 或域名，尝试同时生成 http 和 https 候选
+    urls.append(f"http://{raw_target}")
+    urls.append(f"https://{raw_target}")
+  else:
+    urls.append(raw_target)
+  return urls
+
+
 def audit_and_extract_real_links(target_url):
-  print(f"[*] 正在对目标进行深度指纹审计与链接提取: {target_url}")
   valid_endpoints = set()
-  base_url = target_url.rstrip("/")
+  parsed_u = urlparse(target_url)
+  base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
 
   try:
-    r = requests.get(base_url + "/", headers=HEADERS, timeout=8, verify=False)
+    r = requests.get(base_url + "/", headers=HEADERS, timeout=6, verify=False)
     if r.status_code not in [200, 403]:
-      print(f"[-] 目标 {target_url} 状态码异常 ({r.status_code})，跳过。")
       return valid_endpoints
 
     content_text = r.text.lower()
@@ -59,8 +70,7 @@ def audit_and_extract_real_links(target_url):
         href = a_tag["href"]
         full_link = urljoin(base_url, href)
         parsed_full = urlparse(full_link)
-        parsed_base = urlparse(base_url)
-        if parsed_full.netloc == parsed_base.netloc:
+        if parsed_full.netloc == parsed_u.netloc:
           valid_endpoints.add(full_link)
 
     matched = False
@@ -75,30 +85,37 @@ def audit_and_extract_real_links(target_url):
         break
 
     if matched:
-      print(f"[+] 【命中指纹】{base_url}/ 匹配成功，已收录根目录及提取站内真实链接")
       valid_endpoints.add(base_url + "/")
-    else:
-      print(f"[-] 目标 {target_url} 未检测到代理/订阅指纹特征。")
 
-  except Exception as e:
-    print(f"[!] 访问目标 {target_url} 出错: {e}")
+  except Exception:
+    pass
 
   return valid_endpoints
 
 
 if __name__ == "__main__":
-  all_valid_urls = set()
+  if not os.path.exists(TARGETS_FILE):
+    print(f"[!] 未找到目标配置文件 {TARGETS_FILE}，请先创建！")
+    exit(1)
 
-  for target in TARGET_URLS:
-    endpoints = audit_and_extract_real_links(target)
-    all_valid_urls.update(endpoints)
+  target_urls_to_test = []
+  with open(TARGETS_FILE, "r", encoding="utf-8") as f:
+    for line in f:
+      target_urls_to_test.extend(format_target_url(line))
+
+  all_valid_urls = set()
+  print(f"[*] 已从 {TARGETS_FILE} 加载目标，开始并发指纹审计...")
+
+  with ThreadPoolExecutor(max_workers=20) as executor:
+    futures = {executor.submit(audit_and_extract_real_links, url): url for url in target_urls_to_test}
+    for future in as_completed(futures):
+      res = future.result()
+      if res:
+        all_valid_urls.update(res)
 
   final_urls = sorted(list(all_valid_urls))
   with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     for url in final_urls:
       f.write(url + "\n")
 
-  print(
-      f"\n[+] 审计完成！共生成 {len(final_urls)}"
-      f" 个真实有效的候选链接，已保存至 {OUTPUT_FILE}"
-  )
+  print(f"\n[+] 审计完成！共生成 {len(final_urls)} 个真实有效的候选链接，已保存至 {OUTPUT_FILE}")
