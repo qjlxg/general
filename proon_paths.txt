@@ -1,1 +1,5 @@
 /
+/app/
+/privacy-policy.html
+/refund-policy.html
+/terms-of-use.html
