@@ -1,10 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 import requests
 import os
 import uuid
 
+# 你的目标源列表
 TARGET_URLS = [
     "https://pro-on.org",
     "http://8.218.196.8:80",
@@ -19,7 +20,7 @@ HEADERS = {
     )
 }
 
-# 核心盲打字典（当页面无链接、无robots时，直接以此作为初始探测种子）
+# 核心盲打种子目录
 CORE_SEEDS = [
     "/",
     "/app/",
@@ -36,7 +37,7 @@ CORE_SEEDS = [
     "/data/",
 ]
 
-# 细分类型的探测词汇
+# 探测字典词汇
 DICTIONARY_WORDS = [
     "login",
     "admin",
@@ -59,18 +60,19 @@ DICTIONARY_WORDS = [
     "pool",
 ]
 
-EXTENSIONS = ["", ".yaml", ".yam"]
+# 【核心卡口】严格限定只抓取文件后缀，绝不留空目录作为最终结果
+EXTENSIONS = [".yaml", ".yam"]
 
 
 def harvest_real_paths(target_url):
-  """多路资产收集：首页抓取 + robots/sitemap 尝试 + 历史沉淀"""
+  """收集基础目录种子"""
   discovered_dirs = set(CORE_SEEDS)
   target_parsed = urlparse(target_url)
   base_netloc = target_parsed.netloc
 
   print(f"[*] 正在对目标进行全方位结构探测: {target_url}")
 
-  # 1. 尝试抓取首页超链接
+  # 1. 尝试抓取首页超链接中的目录
   try:
     r = requests.get(target_url, headers=HEADERS, timeout=6, verify=False)
     if r.status_code == 200:
@@ -91,26 +93,7 @@ def harvest_real_paths(target_url):
   except Exception:
     pass
 
-  # 2. 尝试读取 robots.txt
-  try:
-    r = requests.get(
-        target_url.rstrip("/") + "/robots.txt",
-        headers=HEADERS,
-        timeout=4,
-        verify=False,
-    )
-    if r.status_code == 200:
-      for line in r.text.splitlines():
-        if ":" in line:
-          val = line.split(":", 1)[1].strip()
-          if val.startswith("/"):
-            discovered_dirs.add(
-                val if val.endswith("/") else os.path.dirname(val) + "/"
-            )
-  except Exception:
-    pass
-
-  # 3. 历史资产文件加载
+  # 2. 历史资产文件加载（只提取属于该域名的目录）
   if os.path.exists(OUTPUT_FILE):
     try:
       with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
@@ -118,8 +101,14 @@ def harvest_real_paths(target_url):
           l_str = line.strip()
           if l_str:
             p_u = urlparse(l_str)
-            if p_u.netloc == base_netloc and p_u.path.endswith("/"):
-              discovered_dirs.add(p_u.path)
+            if p_u.netloc == base_netloc:
+              path = p_u.path
+              if path.endswith("/"):
+                discovered_dirs.add(path)
+              else:
+                dir_part = os.path.dirname(path) + "/"
+                if dir_part != "//":
+                  discovered_dirs.add(dir_part)
     except Exception:
       pass
 
@@ -135,7 +124,6 @@ def get_soft_404_baseline(target_url):
       "length": 0,
       "title": "",
       "text_snippet": "",
-      "location": "",
   }
   try:
     r = requests.get(
@@ -143,8 +131,6 @@ def get_soft_404_baseline(target_url):
     )
     baseline["status"] = r.status_code
     baseline["length"] = len(r.content)
-    baseline["location"] = r.headers.get("Location", "")
-
     if "text/html" in r.headers.get("Content-Type", "").lower():
       soup = BeautifulSoup(r.text, "html.parser")
       if soup.title:
@@ -156,14 +142,20 @@ def get_soft_404_baseline(target_url):
 
 
 def check_path(target_url, path, baseline):
-  """高精度防误杀验证"""
+  """高精度验证：严格过滤 HTML 网页及软 404"""
   url = target_url.rstrip("/") + path
   try:
     r = requests.get(
-        url, headers=HEADERS, timeout=5, allow_redirects=False, verify=False
+        url, headers=HEADERS, timeout=6, allow_redirects=False, verify=False
     )
 
+    # 过滤明显的错误状态码
     if r.status_code in [404, 500, 502, 503, 504]:
+      return None
+
+    # 【关键卡口 1】强制过滤网页类型（Content-Type 包含 text/html 的绝不可能是 yaml 节点文件）
+    content_type = r.headers.get("Content-Type", "").lower()
+    if "text/html" in content_type:
       return None
 
     if r.status_code in [301, 302, 303, 307, 308]:
@@ -180,25 +172,22 @@ def check_path(target_url, path, baseline):
       return None
 
     if r.status_code == 403:
-      return path
+      # 如果是 yaml 后缀且返回 403（有文件但不可直接列目录/无权限），也可以视作潜在目标保留，或按需调整
+      if path.endswith(".yaml") or path.endswith(".yam"):
+        return path
+      return None
 
     if r.status_code == 200:
+      # 再次做软 404 文本相似度对比检查
       if baseline["status"] == 200:
-        current_title = ""
         current_snippet = r.text[:300].strip().lower()
-        if "text/html" in r.headers.get("Content-Type", "").lower():
-          soup = BeautifulSoup(r.text, "html.parser")
-          if soup.title:
-            current_title = soup.title.get_text(" ", strip=True).lower()
-
         if (
-            current_title == baseline["title"]
-            and current_snippet == baseline["text_snippet"]
+            current_snippet == baseline["text_snippet"]
             and len(current_snippet) > 50
         ):
           return None
 
-      print(f"[发现有效目标] {target_url} -> {path} (200)")
+      print(f"[发现有效文件] {target_url} -> {path} (200)")
       return path
 
   except requests.RequestException:
@@ -208,28 +197,22 @@ def check_path(target_url, path, baseline):
 
 
 def scan_target(target_url):
-  # 1. 搜集基础种子目录（即使没 robots 也能靠 CORE_SEEDS 盲打）
   base_dirs = harvest_real_paths(target_url)
   baseline = get_soft_404_baseline(target_url)
 
-  # 2. 多轮递归探测（确保即使网站结构隐藏得很深也能一层层剥开）
-  found_paths = set(base_dirs)
+  found_paths = set()
   current_bases = base_dirs
 
-  for round_idx in range(2):  # 最多进行 2 轮递归
-    print(
-        f"[*] 开启第 {round_idx + 1} 轮探测，当前基底目录数:"
-        f" {len(current_bases)}"
-    )
-
+  # 两轮递归探测
+  for round_idx in range(2):
     payloads = set()
     for b in current_bases:
       clean_b = b if b.endswith("/") else b + "/"
       for w in DICTIONARY_WORDS:
-        for ext in EXTENSIONS:
+        for ext in EXTENSIONS:  # 严格限制为 .yaml / .yam
           payloads.add(f"{clean_b}{w}{ext}")
 
-    new_discovered_dirs = set()
+    new_dirs = set()
     with ThreadPoolExecutor(max_workers=20) as executor:
       futures = {
           executor.submit(check_path, target_url, p, baseline): p
@@ -239,19 +222,14 @@ def scan_target(target_url):
         res = future.result()
         if res:
           found_paths.add(res)
-          # 如果新发现的路径是个目录（以 / 结尾），加入下一轮递归队列
-          if res.endswith("/"):
-            new_discovered_dirs.add(res)
 
-    # 把新发现的目录作为下一轮的基底
-    if not new_discovered_dirs:
+    if not found_paths:
       break
-    current_bases = sorted(list(new_discovered_dirs))
 
-  # 3. 统一格式化过滤：仅保留目录或 .yaml / .yam 格式的完整链接
+  # 【关键卡口 2】最终格式化输出时：绝对只保留以 .yaml 或 .yam 结尾的完整绝对 URL
   valid_urls = []
   for p in found_paths:
-    if p.endswith("/") or p.endswith(".yaml") or p.endswith(".yam"):
+    if p.endswith(".yaml") or p.endswith(".yam"):
       full_url = target_url.rstrip("/") + (p if p.startswith("/") else "/" + p)
       valid_urls.append(full_url)
 
@@ -277,6 +255,6 @@ if __name__ == "__main__":
       f.write(url_item + "\n")
 
   print(
-      f"\n[+] 探测完成！总计产出有效完整 URL 库 {len(final_urls)} 个，已保存至"
-      f" {OUTPUT_FILE}"
+      f"\n[+] 路径探测完成！过滤后纯净的 YAML/YAM 节点配置文件链接共计"
+      f" {len(final_urls)} 个，已保存至 {OUTPUT_FILE}"
   )
