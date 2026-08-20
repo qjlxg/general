@@ -9,7 +9,7 @@ import os
 
 INPUT_FILE = "proon_paths.txt"
 OUTPUT_CSV = "node_stats.csv"
-OUTPUT_NODES_FILE = "nodes.txt"  # 汇总保存所有提取出的节点
+OUTPUT_NODES_FILE = "nodes.txt"
 
 HEADERS = {
     "User-Agent": (
@@ -50,7 +50,7 @@ def extract_nodes_from_content(content_text):
   """智能解析多种格式，返回提取到的节点列表"""
   nodes = []
 
-  # 1. 尝试直接按行解析（明文多链接或 Clash 节点行）
+  # 1. 尝试直接按行解析
   for line in content_text.splitlines():
     line = line.strip()
     if any(line.startswith(scheme) for scheme in NODE_SCHEMES):
@@ -59,7 +59,7 @@ def extract_nodes_from_content(content_text):
   if len(nodes) > 0:
     return nodes
 
-  # 2. 尝试作为 Base64 解码（常见机场订阅）
+  # 2. 尝试作为 Base64 解码
   cleaned_text = content_text.strip()
   if is_base64(cleaned_text):
     try:
@@ -74,13 +74,12 @@ def extract_nodes_from_content(content_text):
     except Exception:
       pass
 
-  # 3. 尝试作为 YAML 解析（Clash 配置文件格式，提取 proxies 里的节点）
+  # 3. 尝试作为 YAML 解析
   try:
     yaml_data = yaml.safe_load(content_text)
     if isinstance(yaml_data, dict):
       proxies = yaml_data.get("proxies", [])
       if isinstance(proxies, list):
-        # 如果是 clash 节点字典，可以转为字符串或保持原样（这里我们把整个 yaml 或将其转化为通用格式，或者如果 clash 原文需要保存，可按需处理。由于标准节点订阅通常是 uri，这里主要提取 uri 或将 clash 节点转换。大部分情况直接存解析出来的代理字典或跳过。通常 YAML 直连是用原文件或提取 clash 节点。若直接是文本订阅，上面两步已涵盖。）
         pass
   except Exception:
     pass
@@ -109,10 +108,10 @@ def extract_nodes_from_content(content_text):
 
 
 def process_url(url):
-  """请求单个链接，提取节点并返回结果"""
+  """请求单个链接，提取节点并返回结果（确保任何情况下都包含 count 键）"""
   url = url.strip()
   if not url or url.endswith("/"):
-    return {"url": url, "status": "SKIP_DIRECTORY", "nodes": []}
+    return {"url": url, "status": "SKIP_DIRECTORY", "nodes": [], "count": 0}
 
   try:
     r = requests.get(url, headers=HEADERS, timeout=8, verify=False)
@@ -154,17 +153,17 @@ if __name__ == "__main__":
   )
 
   all_results = []
-  global_nodes = set()  # 全局节点去重池
+  global_nodes = set()
 
   with ThreadPoolExecutor(max_workers=20) as executor:
     futures = {executor.submit(process_url, url): url for url in urls_to_fetch}
     for future in as_completed(futures):
       res = future.result()
-      if res["count"] > 0:
-        print(
-            f"[成功提取] {res['url']} -> 发现节点数: {res['count']}"
-        )
-        for n in res["nodes"]:
+      # 安全获取 count，防止任何意外的 KeyError
+      cnt = res.get("count", 0)
+      if cnt > 0:
+        print(f"[成功提取] {res['url']} -> 发现节点数: {cnt}")
+        for n in res.get("nodes", []):
           global_nodes.add(n)
       all_results.append(res)
 
@@ -173,9 +172,7 @@ if __name__ == "__main__":
     writer = csv.writer(f)
     writer.writerow(["URL", "Status", "NodeCount"])
     for r in all_results:
-      writer.writerow(
-          [r["url"], r["status"], r.get("count", len(r.get("nodes", [])))]
-      )
+      writer.writerow([r["url"], r["status"], r.get("count", 0)])
 
   # 2. 写入汇总的节点文件 nodes.txt
   final_nodes_list = sorted(list(global_nodes))
