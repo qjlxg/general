@@ -1,3 +1,13 @@
+http://8.211.135.202/
+http://8.211.135.202/app/
+http://8.211.135.202/hiddify/
+http://8.211.135.202/vless/
+http://8.211.135.202/vpn-android/
+http://8.218.196.8:80/
+http://8.218.196.8:80/app/
+http://8.218.196.8:80/hiddify/
+http://8.218.196.8:80/vless/
+http://8.218.196.8:80/vpn-android/
 https://pro-on.org/
 https://pro-on.org/app/
 https://pro-on.org/app/admin.yam
