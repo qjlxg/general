@@ -9,8 +9,7 @@ on:
       - 'fetch_nodes.py'
       - '.github/workflows/fetch_nodes.yml'
   schedule:
-    # 北京时间每天早上 8:30 自动运行（比路径探测晚半小时，确保 proon_paths.txt 已更新）
-    # 对应 UTC 时间 0:30
+    # 北京时间每天早上 8:30 自动运行（比路径探测晚半小时）
     - cron: '30 0 * * *'
   workflow_dispatch:
 
@@ -38,9 +37,9 @@ jobs:
         run: |
           python fetch_nodes.py
 
-      - name: 自动提交并推送统计 CSV 变动
+      - name: 自动提交并推送节点与统计变动
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add node_stats.csv
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update node statistics CSV [skip ci]" && git push)
+          git add node_stats.csv nodes.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update nodes and statistics [skip ci]" && git push)
