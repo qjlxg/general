@@ -4,8 +4,8 @@ from bs4 import BeautifulSoup
 import requests
 import xml.etree.ElementTree as ET
 
-# 目标网站地址（以 proton 相关或目标站点为主，可自行修改）
-TARGET_URL = "https://pro-on.org/"
+# 目标网站：Proton 官网
+TARGET_URL = "https://pro-on.org"
 OUTPUT_FILE = "proon_paths.txt"
 
 
@@ -21,9 +21,8 @@ def get_paths_from_sitemap(base_url, headers):
     try:
       response = requests.get(sitemap_url, headers=headers, timeout=10)
       if response.status_code == 200:
-        print(发现并解析 Sitemap: {sitemap_url})
+        print(f"发现并解析 Sitemap: {sitemap_url}")
         root = ET.fromstring(response.content)
-        # 处理带有命名空间的 xml
         for elem in root.iter():
           if elem.tag.endswith("loc"):
             if elem.text:
@@ -45,7 +44,7 @@ def crawl_site(start_url, headers):
 
   print(f"开始递归深度抓取: {start_url}")
 
-  while to_visit and len(visited) < 500:  # 限制最大抓取量防止死循环
+  while to_visit and len(visited) < 1000:  # 限制上限防止过大
     current_url = to_visit.pop()
     if current_url in visited:
       continue
